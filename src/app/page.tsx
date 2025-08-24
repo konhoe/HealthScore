@@ -4,6 +4,7 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
 import Title from "@/component/Title";
+import { expressionOverallFromFrames } from "@/lib/score";
 
 const MAX_MB = 200;
 
@@ -12,8 +13,8 @@ export default function HomePage() {
   const [err, setErr] = useState("");
   const [loading, setLoading] = useState(false);
   const [previewUrl, setPreviewUrl] = useState<string | null>(null);
-  const router = useRouter();
   const abortRef = useRef<AbortController | null>(null);
+  const router = useRouter();
 
   // 파일 검증
   const validate = (f: File) => {
@@ -29,29 +30,37 @@ export default function HomePage() {
     return true;
   };
 
-  // 파일 선택 핸들러
+  // 파일 선택
   const onSelect = (f?: File) => {
     if (!f) return;
-    if (!validate(f)) {
-      setFile(null);
-      setPreviewUrl((p) => {
-        if (p) URL.revokeObjectURL(p);
-        return null;
-      });
-      return;
-    }
-    setFile(f);
-    // 미리보기 URL
+
+    // 이전 URL/세션 정리 (videoUrl은 새로 세팅)
     setPreviewUrl((prev) => {
       if (prev) URL.revokeObjectURL(prev);
-      return URL.createObjectURL(f);
+      return null;
     });
-    // 에러/이전 결과 초기화
-    setErr("");
     try {
       sessionStorage.removeItem("lastVideoResult");
       sessionStorage.removeItem("poseResult");
+      sessionStorage.removeItem("poseComments");
+      sessionStorage.removeItem("expressionScore");
+      sessionStorage.removeItem("videoUrl");
     } catch {}
+
+    if (!validate(f)) {
+      setFile(null);
+      return;
+    }
+
+    setFile(f);
+
+    // 새 미리보기 URL + 세션 저장 (Detail의 PosePlayer가 사용)
+    const url = URL.createObjectURL(f);
+    setPreviewUrl(url);
+    try {
+      sessionStorage.setItem("videoUrl", url);
+    } catch {}
+    setErr("");
   };
 
   const onChange = (e: React.ChangeEvent<HTMLInputElement>) =>
@@ -77,11 +86,13 @@ export default function HomePage() {
     setErr("");
 
     try {
-      // 결과 초기화
+      // 결과 초기화 (videoUrl은 유지)
       sessionStorage.removeItem("lastVideoResult");
       sessionStorage.removeItem("poseResult");
+      sessionStorage.removeItem("poseComments");
+      sessionStorage.removeItem("expressionScore");
 
-      // 1) 표정 분석(프레임 추출 + Rekognition)
+      // 1) 표정 분석 호출
       const form = new FormData();
       form.append("video", file);
       const res = await fetch("/api/analyze", {
@@ -91,7 +102,6 @@ export default function HomePage() {
       });
 
       if (!res.ok) {
-        // 서버에서 에러 메시지 내려주면 표시
         let msg = `분석 API 오류 (HTTP ${res.status})`;
         try {
           const j = await res.json();
@@ -101,44 +111,39 @@ export default function HomePage() {
       }
 
       const json = await res.json();
-      if (!json?.ok) {
-        throw new Error(json?.msg || "분석 실패(알 수 없는 오류)");
-      }
+      if (!json?.ok) throw new Error(json?.msg || "분석 실패(알 수 없는 오류)");
       sessionStorage.setItem("lastVideoResult", JSON.stringify(json));
 
-      // 2) 포즈 점수(스텁/또는 실제 API)
-      const poseRes = await fetch("/api/pose", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({}),
-        signal: controller.signal,
-      });
-      if (!poseRes.ok) {
-        throw new Error(`포즈 API 오류 (HTTP ${poseRes.status})`);
+      // 2) 표정 종합 점수 저장 (서버가 주면 그대로, 아니면 로컬 집계)
+      let exprScore: number | null = null;
+      if (typeof json.expressionScore === "number") {
+        exprScore = json.expressionScore;
+      } else {
+        const emoFrames = (json.frames || [])
+          .filter((f: any) => f.ok && f.emotions)
+          .map((f: any) => f.emotions);
+        exprScore = expressionOverallFromFrames(emoFrames);
       }
-      const poseJson = await poseRes.json();
-      sessionStorage.setItem("poseResult", JSON.stringify(poseJson));
+      sessionStorage.setItem("expressionScore", String(exprScore));
 
+      // 3) 디테일 페이지로 이동
+      //   포즈 점수는 Detail의 PosePlayer가 Mediapipe → /api/pose로 배치 전송하며 갱신
       router.push("/results");
     } catch (e: any) {
-      if (e?.name === "AbortError") {
-        // 사용자가 취소한 경우
-        setErr("요청이 취소되었습니다.");
-      } else {
-        setErr(e?.message || "분석 중 오류가 발생했습니다.");
-      }
+      if (e?.name === "AbortError") setErr("요청이 취소되었습니다.");
+      else setErr(e?.message || "분석 중 오류가 발생했습니다.");
     } finally {
       setLoading(false);
     }
   };
 
-  // 언마운트 시 preview URL 정리
+  // 언마운트 시: 요청만 취소 (ObjectURL은 Detail에서 사용하므로 유지)
   useEffect(() => {
     return () => {
       abortRef.current?.abort();
-      if (previewUrl) URL.revokeObjectURL(previewUrl);
+      // 라우팅 후에도 videoUrl이 Detail에서 필요하므로 revoke하지 않음.
     };
-  }, [previewUrl]);
+  }, []);
 
   return (
     <main className="min-h-dvh flex flex-col items-center justify-center p-6">
@@ -156,7 +161,6 @@ export default function HomePage() {
           <input type="file" accept="video/*" onChange={onChange} className="hidden" />
         </label>
 
-        {/* 선택 시 미리보기 (선택사항) */}
         {previewUrl && (
           <div className="w-full mt-4">
             <video

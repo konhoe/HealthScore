@@ -10,6 +10,7 @@
   },
   "dependencies": {
     "@aws-sdk/client-rekognition": "^3.873.0",
+    "@mediapipe/tasks-vision": "0.10.22-rc.20250304",
     "ffmpeg-static": "^5.2.0",
     "ffprobe-static": "^3.1.0",
     "fluent-ffmpeg": "^2.1.3",
